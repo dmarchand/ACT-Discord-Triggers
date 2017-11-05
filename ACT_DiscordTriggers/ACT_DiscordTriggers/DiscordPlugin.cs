@@ -16,6 +16,7 @@ using Discord.Net.Providers.UDPClient;
 using System.Reflection;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
+using System.Diagnostics;
 
 namespace ACT_Plugin {
 	public class DiscordPlugin : UserControl, IActPluginV1 {
@@ -266,6 +267,8 @@ namespace ACT_Plugin {
 		private IAudioClient audioClient;
 		private SpeechAudioFormatInfo formatInfo;
 		private AudioOutStream voiceStream;
+        private List<AudioOutStream> voiceStreams;
+        private List<AudioOutStream> activeStreams;
 		private Label lblTTS;
 		private ComboBox cmbServer;
 		private Label lblServer;
@@ -276,6 +279,8 @@ namespace ACT_Plugin {
 		private TrackBar sliderTTSSpeed;
 		private Label lblTTSSpeed;
 		private ComboBox cmbTTS;
+
+        private const int MAX_VOICE_STREAMS = 5;
 
 		#region IActPluginV1 Members
 		public async void InitPlugin(TabPage pluginScreenSpace, Label pluginStatusText) {
@@ -288,8 +293,10 @@ namespace ACT_Plugin {
 			xmlSettings = new SettingsSerializer(this);
 			LoadSettings();
 
-			//Discord Bot Stuff
-			voiceStream = null;
+            //Discord Bot Stuff
+            voiceStream = null;
+            voiceStreams = new List<AudioOutStream>();
+            activeStreams = new List<AudioOutStream>();
 			formatInfo = new SpeechAudioFormatInfo(48000, AudioBitsPerSample.Sixteen, AudioChannel.Stereo);
 			try {
 				bot = new DiscordSocketClient();
@@ -355,6 +362,29 @@ namespace ACT_Plugin {
 		#endregion
 
 		#region Discord Methods
+        private AudioOutStream safeGetVoiceStream() {
+            AudioOutStream toReturn = null;
+            voiceStreams.ForEach(stream => {
+                if(!activeStreams.Contains(stream)) {
+                    toReturn = stream;
+                }
+            });
+
+            if(toReturn == null) {
+                activeStreams[0].Flush();
+                toReturn = activeStreams[0];
+                activeStreams.Remove(toReturn);
+            }
+
+            return toReturn;
+        }
+
+        private void initVoiceStreams() {
+            for(int i = 0; i < MAX_VOICE_STREAMS; i++) {
+                voiceStreams.Add(audioClient.CreatePCMStream(AudioApplication.Voice, 128 * 1024));
+            }
+        }
+
 		private void speak(string text) {
 			SpeechSynthesizer tts = new SpeechSynthesizer();
 			tts.SelectVoice((string) cmbTTS.SelectedItem);
@@ -362,13 +392,18 @@ namespace ACT_Plugin {
 			tts.Rate = sliderTTSSpeed.Value - 10;
 			MemoryStream ms = new MemoryStream();
 			tts.SetOutputToAudioStream(ms, formatInfo);
-			if (voiceStream == null)
-				voiceStream = audioClient.CreatePCMStream(AudioApplication.Voice, 128 * 1024);
-			tts.SpeakAsync(text);
-			tts.SpeakCompleted += (a, b) => {
+            if(voiceStreams.Count == 0) {
+                initVoiceStreams();
+            }
+            var toDiscordStream = safeGetVoiceStream();
+            tts.SpeakAsync(text);
+
+			tts.SpeakCompleted += async (a, b) => {
+                activeStreams.Add(toDiscordStream);
 				ms.Seek(0, SeekOrigin.Begin);
-				ms.CopyTo(voiceStream);
-				voiceStream.Flush();
+				ms.CopyTo(toDiscordStream);
+                await toDiscordStream.FlushAsync();
+                activeStreams.Remove(toDiscordStream);
 			};
 		}
 
